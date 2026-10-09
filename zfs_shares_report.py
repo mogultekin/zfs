@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline ZFS inventory -> collapsible XLSX. Python 3.6+; no pip packages.
 
-Run on RHEL9: python3 zfs_shares_report.py --host 192.168.1.235 --user root
+Run on RHEL9: python3 zfs_shares_report.py --host ZFS_Controller_IP --user root
 Also runs on Linux/Exadata nodes with Python 3.6+ and OpenSSH installed.
 No internet access, package downloads, or external workbook services are used.
 The default appliance route enters the native shell using 'confirm shell'.
@@ -433,7 +433,7 @@ def write_xlsx(data, output, expanded=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--host', default='192.168.1.235')
+    parser.add_argument('--host', default='ZFS_Controller_IP')
     parser.add_argument('--user', default='root')
     parser.add_argument('--port', type=int, default=22)
     parser.add_argument('--identity', help='SSH private key path (optional)')
