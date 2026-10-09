@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline ZFS inventory -> collapsible XLSX. Python 3.6+; no pip packages.
 
-Run on RHEL9: python3 zfs_shares_report.py --host ZFS_Controller_IP --user root
+Run on RHEL9: python3 zfs_shares_report.py 
 Also runs on Linux/Exadata nodes with Python 3.6+ and OpenSSH installed.
 No internet access, package downloads, or external workbook services are used.
 The default appliance route enters the native shell using 'confirm shell'.
@@ -431,10 +431,27 @@ def write_xlsx(data, output, expanded=False):
         for info in source.infolist():
             dest.writestr(info.filename, replacements.get(info.filename, source.read(info.filename)))
 
+def ask_connection(args):
+    if args.from_json:
+        return
+    missing = [name for name in ('host', 'user') if not getattr(args, name)]
+    if args.batch and missing:
+        raise ValueError('--batch requires ' + ' and '.join('--' + name for name in missing))
+    for name, label in (('host', 'ZFS IP address or hostname'), ('user', 'ZFS SSH username')):
+        while not getattr(args, name):
+            try:
+                value = input(label + ': ').strip()
+            except EOFError:
+                raise ValueError('No input available. Supply --host and --user on the command line.')
+            if value:
+                setattr(args, name, value)
+            else:
+                print('Please enter a value.', file=sys.stderr)
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--host', default='ZFS_Controller_IP')
-    parser.add_argument('--user', default='root')
+    parser.add_argument('--host', help='ZFS IP address or hostname; asks when omitted')
+    parser.add_argument('--user', help='ZFS SSH username; asks when omitted')
     parser.add_argument('--port', type=int, default=22)
     parser.add_argument('--identity', help='SSH private key path (optional)')
     parser.add_argument('--batch', action='store_true', help='Never prompt for SSH credentials')
@@ -460,6 +477,7 @@ def main():
     if output.exists() or raw.exists():
         parser.error('Output XLSX or JSON already exists; choose a new output filename')
     try:
+        ask_connection(args)
         if args.probe_native_shell:
             if args.from_json:
                 parser.error('--probe-native-shell cannot be combined with --from-json')
