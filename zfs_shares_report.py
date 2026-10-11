@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Offline ZFS inventory -> collapsible XLSX. Python 3.6+; no pip packages.
-
-Run on RHEL9: python3 zfs_shares_report.py 
-Also runs on Linux/Exadata nodes with Python 3.6+ and OpenSSH installed.
-No internet access, package downloads, or external workbook services are used.
-The default appliance route enters the native shell using 'confirm shell'.
-Use --shell-mode native for a target that already provides an ordinary SSH shell.
-An artifact-tool-authored XLSX template is embedded below. Python's standard
-library fills it and adds native Excel outline metadata; no Excel runtime needed.
+"""Offline ZFS inventory report for Windows, Linux, RHEL9, and Exadata nodes.
+Requires Python 3.6+ and OpenSSH; no internet or additional Python packages.
+Windows: python zfs_shares_report.py
+Linux: python3 zfs_shares_report.py
+Prompts for controller 1, optional controller 2, and a shared SSH username.
+For clustered systems enter both controller addresses; otherwise leave 2 blank.
+Creates one XLSX with hostname-named tabs, collapsible rows, and no frozen panes.
+All controller addresses, credentials, and output paths are supplied at runtime.
+Solaris appliance access uses 'confirm shell'; --shell-mode native skips it.
 """
 import argparse
 import base64
@@ -49,6 +49,8 @@ datasets=$(zfs list -H -t filesystem,volume -o name)
 newline='
 '
 printf 'BEGIN\t1\n'
+controller_hostname=$(uname -n)
+printf 'HOSTNAME\t%s\n' "$controller_hostname"
 for pool in $pools; do
     case "$pool" in *system*) continue ;; esac
     if [ -n "$SELECTED_POOLS" ]; then
@@ -75,6 +77,7 @@ printf 'END\t1\n'
 def parse_capture(text, source, started, finished):
     roots, names, props, snaps = [], set(), {}, set()
     skipped = []
+    hostname = None
     began = ended = False
     for line in text.splitlines():
         if line == 'BEGIN\t1':
@@ -91,7 +94,11 @@ def parse_capture(text, source, started, finished):
             ended = True
             continue
         parts = line.split('\t')
-        if parts[0] == 'SKIP' and len(parts) == 3:
+        if parts[0] == 'HOSTNAME' and len(parts) == 2:
+            if hostname is not None or not parts[1].strip():
+                raise ValueError('Invalid controller hostname record')
+            hostname = parts[1].strip()
+        elif parts[0] == 'SKIP' and len(parts) == 3:
             skipped.append({'pool': parts[1], 'reason': parts[2]})
             print('Skipping %s: %s' % (parts[1], parts[2]), file=sys.stderr)
         elif parts[0] == 'ROOT' and len(parts) == 2:
@@ -117,7 +124,7 @@ def parse_capture(text, source, started, finished):
             raise ValueError('Unrecognized collection output: ' + line[:160])
     if not began or not ended:
         raise ValueError('Incomplete ZFS collection; native shell access may be required')
-    if not roots or not names:
+    if (not roots or not names) and not (hostname and not roots and not names):
         raise ValueError('No non-system pools with /local datasets were found')
     counts = Counter(name.split('@', 1)[0] for name in snaps)
     if set(counts) - names:
@@ -133,12 +140,16 @@ def parse_capture(text, source, started, finished):
     data = {'schema': 1, 'source': source, 'started_utc': started,
             'finished_utc': finished, 'roots': roots, 'datasets': records,
             'skipped_pools': skipped}
+    if hostname:
+        data['hostname'] = hostname
     validate_data(data)
     return data
 
 def validate_data(data):
-    if data.get('schema') != 1 or not data.get('datasets'):
-        raise ValueError('Expected a nonempty schema 1 capture')
+    if data.get('schema') != 1 or not isinstance(data.get('datasets'), list):
+        raise ValueError('Expected a schema 1 controller capture')
+    if not data['datasets'] and (data.get('roots') or not data.get('hostname')):
+        raise ValueError('Empty controller capture must have a hostname and no dataset roots')
     names = set()
     for item in data['datasets']:
         name = item['name']
@@ -177,11 +188,17 @@ def terminal_text(text):
     """Remove terminal decoration before matching prompts or parsing records."""
     text = re.sub(r'\x1b\][^\x07]*?(?:\x07|\x1b\\)', '', text)
     text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
-    return text.replace('\r\n', '\n').replace('\r', '\n')
+    text = re.sub(r'\x1b[()][0-2A-Z]', '', text)  # character-set selection
+    text = re.sub(r'\x1b[=>78DMHEc]', '', text)  # keypad/cursor modes
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    while re.search(r'[^\n]\x08', text):
+        text = re.sub(r'[^\n]\x08', '', text)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f\ufeff\u200b\u200e\u200f]', '', text)
+    return text.replace('\u00a0', ' ')
 
 def appliance_dialogue(send, expect, program, token):
     """Advance only after each remote prompt/marker has actually arrived."""
-    expect(r'(?m)^[A-Za-z0-9_.-]+:[^\r\n]*>[ \t]*$', 'appliance login prompt')
+    expect(r'(?m)^[ \t]*[A-Za-z0-9_.-]+:[^\r\n]*>[ \t]*$', 'appliance login prompt')
     send('confirm shell\n')
     expect(r'(?m)^[^\r\n|]*#[ \t]*$', 'raw shell prompt after confirm shell')
     # Disable remote terminal echo before sending the collector. The marker
@@ -220,27 +237,30 @@ def run_appliance(command, program, timeout, prompt_timeout=30, debug=False):
             limit = min(timeout, max(60, prompt_timeout))
         deadline = time.monotonic() + limit
         print('Waiting for %s (up to %ss)...' % (stage, limit), file=sys.stderr, flush=True)
+        def details():
+            return ('\nRemote output:\n' + (terminal_text(buffer[-3000:]) or '(No remote stdout received.)') +
+                    '\nRaw terminal tail: ' + repr(buffer[-500:]))
         while True:
-            buffer = terminal_text(buffer)
-            match = re.search(pattern, buffer)
+            # Keep original chunks until a match, including split escape sequences.
+            view = terminal_text(buffer)
+            match = re.search(pattern, view)
             if match:
-                seen = buffer
-                buffer = buffer[match.end():]
+                seen = view
+                buffer = ''
                 print('Received ' + stage + '.', file=sys.stderr, flush=True)
                 return seen, match
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RuntimeError('Timed out waiting for ' + stage + '. Remote output:\n' + buffer[-3000:])
+                raise RuntimeError('Timed out waiting for ' + stage + '.' + details())
             try:
                 chunk = chunks.get(timeout=min(remaining, 15))
             except queue.Empty:
                 if time.monotonic() >= deadline:
-                    raise RuntimeError('Timed out waiting for ' + stage + '. Remote output:\n' +
-                                       (buffer[-3000:] or '(No remote stdout received.)'))
+                    raise RuntimeError('Timed out waiting for ' + stage + '.' + details())
                 print('Still waiting for ' + stage + '...', file=sys.stderr, flush=True)
                 continue
             if chunk is None:
-                raise RuntimeError('SSH ended while waiting for ' + stage + '. Remote output:\n' + buffer[-3000:])
+                raise RuntimeError('SSH ended while waiting for ' + stage + '.' + details())
             decoded = chunk.decode('utf-8', errors='replace')
             if debug:
                 print(terminal_text(decoded), end='', file=sys.stderr, flush=True)
@@ -339,7 +359,7 @@ def cell(row, column, value, style, formula=None):
         ET.SubElement(c, q('v')).text = str(value)
     return c
 
-def write_xlsx(data, output, expanded=False):
+def write_single_xlsx(data, output, expanded=False):
     validate_data(data)
     records = sorted(data['datasets'], key=lambda r: r['name'].split('/'))
     if len(records) > 1048568:
@@ -383,6 +403,10 @@ def write_xlsx(data, output, expanded=False):
     props = ET.Element(q('sheetPr'))
     ET.SubElement(props, q('outlinePr'), {'summaryBelow': '0', 'summaryRight': '0', 'showOutlineSymbols': '1'})
     sheet.insert(0, props)
+    if not records:
+        row = sd.find(q('row') + "[@r='7']")
+        row.clear(); row.set('r', '7')
+        cell(row, 'A', 'No local share datasets found on this controller.', 3)
     max_depth = 0
     for index, item in enumerate(records):
         rownum = index + 9
@@ -418,11 +442,11 @@ def write_xlsx(data, output, expanded=False):
         cell(row, 'I', float(p['compressratio'][:-1]), base[8])
     xfs.set('count', str(len(xfs)))
     sheet.find(q('sheetFormatPr')).set('outlineLevelRow', str(max_depth))
-    # Freeze the dataset name as well as the report header.
-    pane = sheet.find('.//' + q('pane'))
-    pane.set('xSplit', '1')
-    pane.set('topLeftCell', 'B9')
-    pane.set('activePane', 'bottomRight')
+    # No frozen or split panes on any controller tab.
+    for view in sheet.findall('.//' + q('sheetView')):
+        for child in list(view):
+            if child.tag in (q('pane'), q('selection')):
+                view.remove(child)
     dimension = ET.Element(q('dimension'), {'ref': 'A1:I%d' % (len(records) + 8)})
     sheet.insert(1, dimension)
     replacements = {'xl/worksheets/sheet1.xml': ET.tostring(sheet, encoding='utf-8', xml_declaration=True),
@@ -431,13 +455,88 @@ def write_xlsx(data, output, expanded=False):
         for info in source.infolist():
             dest.writestr(info.filename, replacements.get(info.filename, source.read(info.filename)))
 
+def controller_captures(data):
+    captures = data.get('controllers', []) if data.get('schema') == 2 else [data]
+    if not 1 <= len(captures) <= 2:
+        raise ValueError('Expected one or two controller captures')
+    for capture in captures:
+        validate_data(capture)
+    return captures
+
+def write_xlsx(data, output, expanded=False):
+    captures = controller_captures(data)
+    packages = []
+    for capture in captures:
+        buffer = io.BytesIO()
+        write_single_xlsx(capture, buffer, expanded)
+        with zipfile.ZipFile(buffer) as z:
+            packages.append({name: z.read(name) for name in z.namelist()})
+    package = packages[0]
+    workbook = ET.fromstring(package['xl/workbook.xml'])
+    sheets = workbook.find(q('sheets'))
+    relations = ET.fromstring(package['xl/_rels/workbook.xml.rels'])
+    types = ET.fromstring(package['[Content_Types].xml'])
+    styles = ET.fromstring(package['xl/styles.xml'])
+    xfs = styles.find(q('cellXfs'))
+    rns = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    pns = 'http://schemas.openxmlformats.org/package/2006/relationships'
+    cns = 'http://schemas.openxmlformats.org/package/2006/content-types'
+    used = set()
+    for index, capture in enumerate(captures):
+        hostname = capture.get('hostname') or capture.get('source', 'Controller').split('@')[-1]
+        name = re.sub(r'[\x00-\x1f\[\]:*?/\\]', '_', hostname).strip("'") or 'Controller'
+        base = name[:31]; name = base; suffix = 2
+        while name.lower() in used:
+            tail = ' (%d)' % suffix
+            name = base[:31-len(tail)] + tail; suffix += 1
+        used.add(name.lower())
+        if index == 0:
+            sheets[0].set('name', name)
+            continue
+        other = ET.fromstring(packages[index]['xl/styles.xml']).find(q('cellXfs'))
+        offset = len(xfs)
+        for xf in other:
+            xfs.append(copy.deepcopy(xf))
+        sheet = ET.fromstring(packages[index]['xl/worksheets/sheet1.xml'])
+        for c in sheet.findall('.//' + q('c')):
+            c.set('s', str(offset + int(c.get('s', '0'))))
+        path = 'xl/worksheets/sheet%d.xml' % (index + 1)
+        package[path] = ET.tostring(sheet, encoding='utf-8', xml_declaration=True)
+        rid = 'controllerSheet%d' % (index + 1)
+        ET.SubElement(sheets, q('sheet'), {'name': name, 'sheetId': str(index + 1), '{'+rns+'}id': rid})
+        ET.SubElement(relations, '{'+pns+'}Relationship', {'Id': rid, 'Type': rns+'/worksheet', 'Target': '/'+path})
+        ET.SubElement(types, '{'+cns+'}Override', {'PartName': '/'+path,
+                       'ContentType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'})
+    xfs.set('count', str(len(xfs)))
+    for path, element in [('xl/workbook.xml',workbook), ('xl/_rels/workbook.xml.rels',relations),
+                          ('[Content_Types].xml',types), ('xl/styles.xml',styles)]:
+        if path == 'xl/_rels/workbook.xml.rels':
+            ET.register_namespace('', pns)
+        elif path == '[Content_Types].xml':
+            ET.register_namespace('', cns)
+        package[path] = ET.tostring(element, encoding='utf-8', xml_declaration=True)
+    with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as z:
+        for path, content in package.items():
+            z.writestr(path, content)
+
+def collect_controllers(args):
+    captures = []
+    for host in [args.host] + ([args.host2] if args.host2 else []):
+        controller_args = copy.copy(args)
+        controller_args.host = host
+        print('Connecting to controller ' + host + '...', file=sys.stderr, flush=True)
+        captures.append(collect(controller_args))
+    if args.probe_native_shell:
+        return None
+    return captures[0] if len(captures) == 1 else {'schema': 2, 'controllers': captures}
+
 def ask_connection(args):
     if args.from_json:
         return
     missing = [name for name in ('host', 'user') if not getattr(args, name)]
     if args.batch and missing:
         raise ValueError('--batch requires ' + ' and '.join('--' + name for name in missing))
-    for name, label in (('host', 'ZFS IP address or hostname'), ('user', 'ZFS SSH username')):
+    for name, label in (('host', 'Controller 1 IP address or hostname'),):
         while not getattr(args, name):
             try:
                 value = input(label + ': ').strip()
@@ -447,10 +546,28 @@ def ask_connection(args):
                 setattr(args, name, value)
             else:
                 print('Please enter a value.', file=sys.stderr)
+    if getattr(args, 'host2', None) is None:
+        if args.batch:
+            args.host2 = ''
+        else:
+            try:
+                args.host2 = input('Controller 2 IP address or hostname (Enter for standalone/simulator): ').strip()
+            except EOFError:
+                args.host2 = ''
+    if args.host2 and args.host2.lower() == args.host.lower():
+        raise ValueError('Controller addresses must be different')
+    while not args.user:
+        try:
+            args.user = input('ZFS SSH username (used for both controllers): ').strip()
+        except EOFError:
+            raise ValueError('No username provided; supply --user')
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--version', action='version', version='zfs_shares_report 1.5 (two controllers, no frozen panes)')
     parser.add_argument('--host', help='ZFS IP address or hostname; asks when omitted')
+    parser.add_argument('--host2', help='Optional second controller; blank means standalone/simulator')
+    parser.add_argument('--single', action='store_true', help='Skip the second-controller prompt')
     parser.add_argument('--user', help='ZFS SSH username; asks when omitted')
     parser.add_argument('--port', type=int, default=22)
     parser.add_argument('--identity', help='SSH private key path (optional)')
@@ -468,6 +585,10 @@ def main():
     parser.add_argument('--expanded', action='store_true', help='Open with all outline rows visible')
     parser.add_argument('--from-json', type=Path, help='Rebuild an earlier JSON capture without SSH')
     args = parser.parse_args()
+    if args.single:
+        if args.host2:
+            parser.error('--single cannot be combined with a second controller')
+        args.host2 = ''
     if not 1 <= args.port <= 65535 or args.timeout < 1 or args.prompt_timeout < 1:
         parser.error('Port or timeout out of range')
     output = args.output or Path('zfs_shares_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '.xlsx')
@@ -481,10 +602,10 @@ def main():
         if args.probe_native_shell:
             if args.from_json:
                 parser.error('--probe-native-shell cannot be combined with --from-json')
-            collect(args)
+            collect_controllers(args)
             return 0
-        data = json.loads(args.from_json.read_text(encoding='utf-8')) if args.from_json else collect(args)
-        validate_data(data)
+        data = json.loads(args.from_json.read_text(encoding='utf-8')) if args.from_json else collect_controllers(args)
+        captures = controller_captures(data)
         output.parent.mkdir(parents=True, exist_ok=True)
         # Render completely before creating either final file.
         buffer = io.BytesIO()
@@ -493,7 +614,8 @@ def main():
             f.write(buffer.getvalue())
         with raw.open('x', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print('Created %s (%d datasets)' % (output.resolve(), len(data['datasets'])))
+        print('Created %s (%d controller tabs, %d datasets)' %
+              (output.resolve(), len(captures), sum(len(c['datasets']) for c in captures)))
         print('Raw capture: ' + str(raw.resolve()))
         return 0
     except KeyboardInterrupt:
