@@ -1,66 +1,127 @@
-# ZFS Shares Report
+# ZFS shares report — version 1.5
 
-Export Oracle ZFS Storage Appliance share usage to an Excel workbook with collapsible pool, project, and share rows.
+Create an offline Excel inventory of ZFS shares from a standalone appliance, simulator, or two-controller clustered system. The report generator runs on Windows or Linux, including RHEL9 and Exadata nodes. The appliance-side collector runs in the Solaris x86 native shell.
 
-The report generator runs on a Linux, RHEL, or Exadata node and collects readings over SSH from the appliance’s **Solaris x86** shell. **No internet access or additional Python packages are required.**
+All controller addresses, usernames, and output paths are runtime parameters. No environment-specific addresses or accounts are built into the script. Without an output path, timestamped files are saved in the current directory.
 
 ## Requirements
 
-- Python 3.6 or later and an SSH client on the reporting node.
-- SSH access to the ZFS appliance.
-- An appliance account allowed to enter `confirm shell` and run `zpool` and `zfs`.
+- Python 3.6 or later.
+- An OpenSSH client available as `ssh` on the command search path.
+- SSH connectivity to each requested controller.
+- An appliance account permitted to enter `confirm shell` and read `zpool` and `zfs` information.
 
-## Quick start
+No internet access, pip packages, Excel installation, or external workbook service is required. The workbook template is embedded. The script does not install software, change appliance configuration, or modify Exadata databases or services.
 
-Copy [`zfs_shares_report.py`](zfs_shares_report.py) to your reporting node, then run:
+## Windows
 
-```bash
+Save the script in your chosen folder. Open Command Prompt or PowerShell there and run:
+
+```cmd
+python --version
+ssh -V
+python zfs_shares_report.py
+```
+
+If your Python installation uses the Windows launcher, use `py -3 zfs_shares_report.py` instead. Quote paths containing spaces. Output files are created in the current folder unless `--output` specifies another location.
+
+Windows support from version 1.4 is retained: the script handles terminal control characters in SSH output, displays connection stages, and uses bounded prompt waits.
+
+## Linux, RHEL9, and Exadata
+
+Copy the same script to your chosen folder and run:
+
+```sh
+python3 --version
+ssh -V
 python3 zfs_shares_report.py
 ```
 
-Enter the appliance IP address or hostname and SSH username when prompted. SSH then asks for the password.
+Use the name or path of your installed Python 3 interpreter if it differs. No separate Linux edition is needed.
 
-## Example session
+## Controller prompts and clustered systems
 
-The address, timestamps, and dataset count below are placeholders.
+The script asks for:
 
-```text
-[root@rhel9 ~]# python3 zfs_shares_report.py
-ZFS IP address or hostname: ZFS_Appliance_IP
-ZFS SSH username: root
-Waiting for appliance login prompt (up to 60s)...
-(root@ZFS_Appliance_IP) Password:
-Received appliance login prompt.
-Waiting for raw shell prompt after confirm shell (up to 30s)...
-Received raw shell prompt after confirm shell.
-Waiting for raw shell readiness marker (up to 30s)...
-Received raw shell readiness marker.
-Waiting for collector completion marker (up to 600s)...
-Received collector completion marker.
-Connection to ZFS_Appliance_IP closed.
-Created /root/zfs_shares_YYYYMMDD_hhmmss.xlsx (99 datasets)
-Raw capture: /root/zfs_shares_YYYYMMDD_hhmmss.json
+1. **Controller 1 address:** required; an IP address or hostname.
+2. **Controller 2 address:** optional. For a clustered system, enter the second controller's IP address or hostname. Leave it blank for a standalone appliance or simulator.
+3. **SSH username:** shared by both controller connections.
+
+Controllers are contacted sequentially. SSH may ask for each controller's password and host-key confirmation separately. Passwords are handled by SSH and are not stored by the script.
+
+Providing two controller addresses creates **one XLSX workbook with two tabs**, each named from that controller's `uname -n` hostname. A single-controller run creates one hostname-named tab. Long, invalid, or duplicate names are adjusted to fit Excel's 31-character tab-name limit.
+
+Two addresses select a two-controller report; the script does not verify cluster membership. It reports local share datasets visible on each controller independently, without summing or deduplicating across controllers. A controller with no local share datasets gets a tab explaining that result. If collection fails on either requested controller, no combined workbook is written.
+
+## Command-line examples
+
+Replace uppercase placeholders with your parameters. On Windows, use `python` in place of `python3` when appropriate.
+
+```sh
+# Clustered system: both controllers in one workbook.
+python3 zfs_shares_report.py --host CONTROLLER_1 --host2 CONTROLLER_2 --user SSH_USERNAME
+
+# Standalone appliance or simulator; no second-controller prompt.
+python3 zfs_shares_report.py --host CONTROLLER_1 --user SSH_USERNAME --single
+
+# Select a pool and destination; connection details are requested.
+python3 zfs_shares_report.py --pool POOL_NAME --output "REPORT_DIRECTORY/report.xlsx"
+
+# Start with all dataset rows expanded.
+python3 zfs_shares_report.py --expanded
+
+# Unattended clustered collection with an existing SSH key.
+python3 zfs_shares_report.py --host CONTROLLER_1 --host2 CONTROLLER_2 --user SSH_USERNAME --identity "SSH_KEY_PATH" --batch
+
+# Rebuild a capture without connecting to the appliance.
+python3 zfs_shares_report.py --from-json "CAPTURE_FILE.json" --output "REBUILT_REPORT.xlsx"
+
+# Display version or options.
+python3 zfs_shares_report.py --version
+python3 zfs_shares_report.py --help
 ```
 
-## Output files
+In interactive mode, omitted connection parameters are requested. `--single` suppresses the second-controller question. With `--batch`, `--host` and `--user` are required; omitting `--host2` selects a single controller without prompting. `--from-json` asks for no connection details.
 
-| File | Contents |
-| --- | --- |
-| `zfs_shares_YYYYMMDD_hhmmss.xlsx` | Formatted Excel report with collapsible rows |
-| `zfs_shares_YYYYMMDD_hhmmss.json` | Raw readings for inspection or report regeneration |
+## Output
 
-Files are saved in the current directory by default. Use the **+ / −** outline controls in Excel to expand or collapse projects and shares.
+By default, the current directory receives `zfs_shares_YYYYMMDD_HHMMSS.xlsx` and a matching `.json` capture. Existing output files are not deliberately overwritten. Two-controller JSON captures contain both controllers. Regeneration supports both older single-controller captures and the combined format.
 
-## Report columns
+Columns: dataset path, kind, readable used space, exact used bytes, readable snapshot space, exact snapshot bytes, direct snapshot count, compression setting, and compression ratio.
 
-| Column | Description |
-| --- | --- |
-| Dataset | Full ZFS dataset path |
-| Kind | Pool/local, project, filesystem, or volume |
-| Used / Used (bytes) | Readable used space and exact bytes |
-| Snapshot space / Snapshots (bytes) | Readable snapshot space and exact bytes |
-| Snapshots (direct) | Snapshot count for that dataset |
-| Compression | Current compression setting |
-| Ratio | Compression ratio reported by ZFS |
+**No sheet has frozen or split panes.** Collapsible outlines remain available. Pool `/local` and project rows are initially visible; share rows are collapsed. Use Excel's outline controls to expand them, or pass `--expanded`. Excel supports up to seven nested outline levels.
 
-**Reading the figures:** Parent used space includes its children, so adding all hierarchy rows would double-count usage. Snapshot space and counts apply to each dataset directly. Readable sizes use powers of 1024.
+## Changes from version 1.4
+
+- Optional second controller address for clustered systems, with `--host2` and `--single` options.
+- One workbook containing separate hostname-named tabs for the controllers.
+- All frozen and split panes removed; dataset row outlines retained.
+- Combined JSON captures and regeneration support.
+- An explicit empty-result tab for controllers with no local share datasets.
+- Windows/Linux support, offline generation, Solaris-compatible dataset checks, and connection diagnostics retained.
+
+## Metric definitions
+
+- Only filesystems and volumes under each non-system pool's `/local` dataset are included. Pool names containing lowercase `system` are excluded; other pools without `/local` are reported as skipped.
+- Parent `used` values already include descendants. Summing all hierarchy rows would double-count space.
+- `usedbysnapshots` is the space charged to snapshots of that dataset. It is not a recursive project total or the sum of individual snapshot `used` values.
+- Snapshot counts are direct counts for that dataset, not counts across descendants.
+- `compression` is the effective setting; `compressratio` is the achieved ratio reported by ZFS.
+- Readable sizes use powers of 1024. Exact bytes come from `zfs get -p`. Exact byte values exceeding Excel's 15-digit numeric precision are stored as text; JSON preserves original readings.
+- Readings are collected sequentially, including between controllers, and are not an atomic snapshot. Failed commands or missing required properties stop report generation instead of substituting zeros.
+
+## Diagnostics
+
+```sh
+python3 zfs_shares_report.py --host CONTROLLER_1 --user SSH_USERNAME --single --probe-native-shell --debug-ssh
+```
+
+The probe checks native-shell access and the availability of `zpool` and `zfs`, without creating a workbook. To probe both controllers, replace `--single` with `--host2 CONTROLLER_2`.
+
+The appliance route opens interactive SSH, waits for the appliance prompt, enters `confirm shell`, waits for the raw-shell prompt, and runs the read-only collector. For a target already providing an ordinary SSH shell, use `--shell-mode native`.
+
+By default, login allows 60 seconds, subsequent shell transitions allow 30 seconds each (`--prompt-timeout`), and collection allows 600 seconds (`--timeout`). Waiting messages appear every 15 seconds. `--debug-ssh` displays connection diagnostics and remote output. Prompt timeouts include a raw terminal tail for troubleshooting. Ctrl+C cancels the run and closes the script's SSH session.
+
+## Validation
+
+Version 1.4 successfully collected live appliance data and generated a workbook from Windows. Version 1.5 passed 25 local tests, including single- and dual-controller input, hostname tab naming, empty-controller results, and removal of panes. A generated two-controller workbook was reopened, recalculated, inspected, and visually reviewed. Live dual-controller collection has not yet been verified.
